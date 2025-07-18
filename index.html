@@ -31,6 +31,9 @@
         .error { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; padding: 15px; border-radius: 5px; margin: 20px 0; }
         .reset-btn { background: #6c757d; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin-top: 20px; }
         .reset-btn:hover { background: #545b62; }
+        .manual-instructions { background: #e9ecef; border: 1px solid #ced4da; padding: 20px; border-radius: 5px; margin: 20px 0; }
+        .copy-btn { background: #28a745; color: white; padding: 5px 10px; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; margin-left: 10px; }
+        .copy-btn:hover { background: #218838; }
     </style>
 </head>
 <body>
@@ -67,6 +70,33 @@
                 <p id="progress-text">Starting...</p>
             </div>
             
+            <div class="manual-instructions" id="manual-instructions" style="display: none;">
+                <h3>📋 Manual Processing Required</h3>
+                <p style="margin-bottom: 15px;">Due to GitHub API limitations, please create the issue manually:</p>
+                <ol style="margin-bottom: 15px;">
+                    <li style="margin-bottom: 8px;">Go to: <a href="https://github.com/ronakjindalghl/vm-drop-audio-checker/issues/new" target="_blank" style="color: #3498db;">Create New Issue</a></li>
+                    <li style="margin-bottom: 8px;">Copy the title below:</li>
+                </ol>
+                <div style="background: #f8f9fa; padding: 10px; border-radius: 3px; margin: 10px 0; font-family: monospace; font-size: 12px; border: 1px solid #e9ecef;">
+                    <span id="issue-title"></span>
+                    <button class="copy-btn" onclick="copyToClipboard('issue-title')">Copy</button>
+                </div>
+                <ol start="3" style="margin-bottom: 15px;">
+                    <li style="margin-bottom: 8px;">Copy the description below:</li>
+                </ol>
+                <div style="background: #f8f9fa; padding: 10px; border-radius: 3px; margin: 10px 0; font-family: monospace; font-size: 11px; max-height: 200px; overflow-y: auto; border: 1px solid #e9ecef;">
+                    <pre id="issue-body" style="margin: 0; white-space: pre-wrap; word-wrap: break-word;"></pre>
+                    <button class="copy-btn" onclick="copyToClipboard('issue-body')">Copy</button>
+                </div>
+                <ol start="4" style="margin-bottom: 15px;">
+                    <li style="margin-bottom: 8px;">Add labels: <code style="background: #f1f1f1; padding: 2px 4px; border-radius: 3px;">audio-processing</code> and <code style="background: #f1f1f1; padding: 2px 4px; border-radius: 3px;">automated</code></li>
+                    <li style="margin-bottom: 8px;">Click "Submit new issue"</li>
+                    <li style="margin-bottom: 8px;">Wait 1-2 minutes for processing</li>
+                    <li style="margin-bottom: 8px;">Results will appear as a comment on the issue</li>
+                </ol>
+                <button class="reset-btn" onclick="resetForm()">🔄 Process Another File</button>
+            </div>
+            
             <div class="results-area" id="results-area">
                 <h3>📊 Compliance Results</h3>
                 <div id="violations-container"></div>
@@ -86,8 +116,6 @@
 
     <script>
         let currentFile = null;
-        const REPO_OWNER = 'ronakjindalghl';
-        const REPO_NAME = 'vm-drop-audio-checker';
         
         const uploadArea = document.getElementById('upload-area');
         const fileInput = document.getElementById('file-input');
@@ -127,17 +155,15 @@
             document.getElementById('progress-area').style.display = 'block';
             
             try {
-                updateProgress(10, 'Converting file...');
+                updateProgress(30, 'Converting file to base64...');
                 const base64 = await fileToBase64(currentFile);
                 
-                updateProgress(30, 'Creating processing request...');
-                const issueNumber = await createProcessingIssue(base64, currentFile.name);
+                updateProgress(60, 'Preparing issue content...');
+                await prepareManualIssue(base64, currentFile.name);
                 
-                updateProgress(50, 'Transcribing audio (this may take 1-2 minutes)...');
-                const results = await pollForResults(issueNumber);
+                updateProgress(100, 'Ready for manual submission');
+                showManualInstructions();
                 
-                updateProgress(100, 'Complete!');
-                showResults(results);
             } catch (error) {
                 console.error('Error:', error);
                 showError(error.message || 'An error occurred during processing');
@@ -153,8 +179,11 @@
             });
         }
         
-        async function createProcessingIssue(base64Content, fileName) {
+        async function prepareManualIssue(base64Content, fileName) {
             const timestamp = Date.now();
+            
+            const issueTitle = `🎤 Audio Processing: ${fileName} - ${timestamp}`;
+            
             const issueBody = `## Audio Processing Request
 
 **File:** ${fileName}
@@ -170,78 +199,43 @@ AUDIO_DATA_END
 ---
 *This is an automated processing request. Do not edit this issue.*`;
 
-            const response = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Accept': 'application/vnd.github.v3+json' },
-                body: JSON.stringify({
-                    title: `🎤 Audio Processing: ${fileName} - ${timestamp}`,
-                    body: issueBody,
-                    labels: ['audio-processing', 'automated']
-                })
+            document.getElementById('issue-title').textContent = issueTitle;
+            document.getElementById('issue-body').textContent = issueBody;
+        }
+        
+        function copyToClipboard(elementId) {
+            const element = document.getElementById(elementId);
+            const text = element.textContent;
+            
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = element.nextElementSibling;
+                const originalText = btn.textContent;
+                btn.textContent = 'Copied!';
+                btn.style.background = '#28a745';
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.style.background = '#28a745';
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy: ', err);
+                // Fallback for older browsers
+                const range = document.createRange();
+                range.selectNode(element);
+                window.getSelection().removeAllRanges();
+                window.getSelection().addRange(range);
+                document.execCommand('copy');
+                window.getSelection().removeAllRanges();
             });
-            
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(`Failed to create processing request: ${errorData.message || 'Unknown error'}`);
-            }
-            
-            const issue = await response.json();
-            return issue.number;
         }
         
-        async function pollForResults(issueNumber) {
-            const maxAttempts = 30;
-            const pollInterval = 10000;
-            
-            for (let attempt = 0; attempt < maxAttempts; attempt++) {
-                try {
-                    const response = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues/${issueNumber}/comments`);
-                    
-                    if (response.ok) {
-                        const comments = await response.json();
-                        for (const comment of comments) {
-                            if (comment.body.includes('TRANSCRIPTION_RESULTS_START')) {
-                                const resultsMatch = comment.body.match(/TRANSCRIPTION_RESULTS_START\n(.*?)\nTRANSCRIPTION_RESULTS_END/s);
-                                if (resultsMatch) {
-                                    try {
-                                        return JSON.parse(resultsMatch[1]);
-                                    } catch (e) {
-                                        console.error('Failed to parse results:', e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    if (attempt < maxAttempts - 1) await sleep(pollInterval);
-                } catch (error) {
-                    console.error('Polling error:', error);
-                    if (attempt === maxAttempts - 1) throw new Error('Processing timeout. Please try again.');
-                    await sleep(pollInterval);
-                }
-            }
-            throw new Error('Processing timeout. Please check the GitHub repository for status.');
-        }
-        
-        function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
         function updateProgress(percent, text) {
             document.getElementById('progress-fill').style.width = percent + '%';
             document.getElementById('progress-text').textContent = text;
         }
         
-        function showResults(results) {
+        function showManualInstructions() {
             hideAllAreas();
-            if (results.error) { showError(results.message); return; }
-            
-            const violationsContainer = document.getElementById('violations-container');
-            if (results.violations && results.violations.length > 0) {
-                violationsContainer.innerHTML = `<div class="violations"><h4>❌ ${results.violations.length} Violation(s) Found:</h4>${results.violations.map(v => `<div class="violation-item"><strong>Keyword:</strong> "${v.keyword}"<br><strong>Found:</strong> "${v.matched_text}"<br><strong>Context:</strong> ...${v.context}...</div>`).join('')}</div>`;
-            } else {
-                violationsContainer.innerHTML = `<div class="clean-result"><h4>✅ No Violations Found</h4><p>This audio file does not contain any blocked keywords.</p></div>`;
-            }
-            
-            document.getElementById('transcription-text').textContent = results.transcription || 'No transcription available';
-            document.getElementById('results-area').style.display = 'block';
+            document.getElementById('manual-instructions').style.display = 'block';
         }
         
         function showError(message) {
@@ -251,12 +245,12 @@ AUDIO_DATA_END
         }
         
         function hideAllAreas() {
-            ['file-info', 'progress-area', 'results-area', 'error-area'].forEach(id => 
+            ['file-info', 'progress-area', 'results-area', 'error-area', 'manual-instructions'].forEach(id => 
                 document.getElementById(id).style.display = 'none');
         }
         
         function hideOtherAreas() {
-            ['progress-area', 'results-area', 'error-area'].forEach(id => 
+            ['progress-area', 'results-area', 'error-area', 'manual-instructions'].forEach(id => 
                 document.getElementById(id).style.display = 'none');
         }
         
