@@ -1,13 +1,14 @@
 name: Audio Transcription and Compliance Check
 
 on:
-  repository_dispatch:
-    types: [transcribe-audio]
+  issues:
+    types: [opened]
 
 jobs:
   transcribe:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: contains(github.event.issue.labels.*.name, 'audio-processing')
     
     steps:
     - name: Checkout repository
@@ -21,64 +22,45 @@ jobs:
         python-version: '3.11'
         
     - name: Install dependencies
-      run: |
-        pip install openai requests python-dotenv
+      run: pip install openai requests
         
-    - name: Check rate limits
-      id: rate-check
+    - name: Extract audio data from issue
       run: |
         python3 -c "
-        import json
-        import os
-        from datetime import datetime
+        import re, os, time
         
-        # Check current rate limits
-        try:
-            with open('rate-limits.json', 'r') as f:
-                limits = json.load(f)
-        except FileNotFoundError:
-            limits = {'date': '', 'hour': 0, 'count': 0}
-        
-        now = datetime.now()
-        current_date = now.strftime('%Y-%m-%d')
-        current_hour = now.hour
-        
-        # Reset if new hour or day
-        if limits['date'] != current_date or limits['hour'] != current_hour:
-            limits = {'date': current_date, 'hour': current_hour, 'count': 0}
-        
-        # Check if over limit
-        if limits['count'] >= 10:
-            print('Rate limit exceeded')
+        issue_body = '''${{ github.event.issue.body }}'''
+        match = re.search(r'AUDIO_DATA_START\n(.*?)\nAUDIO_DATA_END', issue_body, re.DOTALL)
+        if not match:
+            print('No audio data found in issue')
             exit(1)
         
-        print(f'Current usage: {limits[\"count\"]}/10 this hour')
+        audio_content = match.group(1).strip()
+        title = '''${{ github.event.issue.title }}'''
+        file_name_match = re.search(r'Audio Processing: (.*?) -', title)
+        file_name = file_name_match.group(1) if file_name_match else 'unknown.mp3'
+        timestamp_match = re.search(r'- (\d+)', title)
+        timestamp = timestamp_match.group(1) if timestamp_match else str(int(time.time() * 1000))
         
-        # Increment count
-        limits['count'] += 1
+        with open(os.environ['GITHUB_ENV'], 'a') as f:
+            f.write(f'AUDIO_CONTENT={audio_content}\n')
+            f.write(f'FILE_NAME={file_name}\n')
+            f.write(f'TIMESTAMP={timestamp}\n')
+            f.write(f'ISSUE_NUMBER=${{ github.event.issue.number }}\n')
         
-        with open('rate-limits.json', 'w') as f:
-            json.dump(limits, f)
+        print(f'Extracted audio data for file: {file_name}')
         "
         
     - name: Process audio file
       env:
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        AUDIO_CONTENT: ${{ github.event.client_payload.audio_content }}
-        FILE_NAME: ${{ github.event.client_payload.file_name }}
-        TIMESTAMP: ${{ github.event.client_payload.timestamp }}
       run: |
         python3 -c "
-        import json
-        import base64
-        import os
-        import re
-        import time
-        import sys
+        import json, base64, os, re, time, sys
         from openai import OpenAI
         
         def load_blocked_keywords():
-            keywords_content = '''Internal Revenue Service
+            return '''Internal Revenue Service
         Social Security number suspended
         law enforcement action
         asset seizure
@@ -160,83 +142,52 @@ jobs:
         Award presentation
         give away
         IRS
-        Games Commission'''
-            
-            keywords = []
-            for line in keywords_content.strip().split('\n'):
-                if line.strip():
-                    keywords.append(line.strip())
-            return keywords
+        Games Commission'''.strip().split('\n')
         
-        def check_for_blocked_content_substring(transcription, blocked_keywords):
-            found_violations = []
-            
-            for keyword in blocked_keywords:
-                pattern = re.compile(re.escape(keyword), re.IGNORECASE)
-                matches = pattern.finditer(transcription)
-                
-                for match in matches:
-                    start_pos = max(0, match.start() - 50)
-                    end_pos = min(len(transcription), match.end() + 50)
-                    context = transcription[start_pos:end_pos]
-                    
-                    found_violations.append({
-                        'keyword': keyword,
-                        'matched_text': match.group(),
-                        'context': context,
-                        'position': match.start()
-                    })
-            
-            return found_violations
+        def check_violations(transcription, keywords):
+            violations = []
+            for keyword in keywords:
+                if keyword.strip():
+                    pattern = re.compile(re.escape(keyword.strip()), re.IGNORECASE)
+                    for match in pattern.finditer(transcription):
+                        start_pos = max(0, match.start() - 50)
+                        end_pos = min(len(transcription), match.end() + 50)
+                        violations.append({
+                            'keyword': keyword.strip(),
+                            'matched_text': match.group(),
+                            'context': transcription[start_pos:end_pos],
+                            'position': match.start()
+                        })
+            return violations
         
-        def transcribe_with_retry(client, audio_data, max_retries=3):
-            for attempt in range(max_retries):
-                try:
-                    with open('temp_audio.mp3', 'wb') as f:
-                        f.write(audio_data)
-                    
-                    with open('temp_audio.mp3', 'rb') as audio_file:
-                        transcript = client.audio.transcriptions.create(
-                            model='whisper-1',
-                            file=audio_file,
-                            response_format='text'
-                        )
-                    
-                    os.remove('temp_audio.mp3')
-                    return transcript
-                    
-                except Exception as e:
-                    print(f'Attempt {attempt + 1} failed: {str(e)}')
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
-                    else:
-                        raise e
-        
-        # Main processing
         try:
             api_key = os.environ['OPENAI_API_KEY']
+            if not api_key or api_key == 'PLACEHOLDER_REPLACE_WITH_ACTUAL_KEY':
+                raise Exception('OpenAI API key not configured. Please add your API key to repository secrets.')
+            
             audio_content = os.environ['AUDIO_CONTENT']
             file_name = os.environ['FILE_NAME']
             timestamp = os.environ['TIMESTAMP']
             
-            if not api_key:
-                raise Exception('OpenAI API key not found')
-            
             print(f'Processing file: {file_name}')
-            
             client = OpenAI(api_key=api_key)
             audio_data = base64.b64decode(audio_content)
-            print(f'Audio data size: {len(audio_data)} bytes')
             
-            print('Starting transcription...')
-            transcript = transcribe_with_retry(client, audio_data)
+            with open('temp_audio.mp3', 'wb') as f:
+                f.write(audio_data)
+            
+            with open('temp_audio.mp3', 'rb') as audio_file:
+                transcript = client.audio.transcriptions.create(
+                    model='whisper-1',
+                    file=audio_file,
+                    response_format='text'
+                )
+            
+            os.remove('temp_audio.mp3')
             print(f'Transcription completed: {len(transcript)} characters')
             
-            blocked_keywords = load_blocked_keywords()
-            print(f'Loaded {len(blocked_keywords)} blocked keywords')
-            
-            print('Checking for violations...')
-            violations = check_for_blocked_content_substring(transcript, blocked_keywords)
+            keywords = load_blocked_keywords()
+            violations = check_violations(transcript, keywords)
             print(f'Found {len(violations)} violations')
             
             results = {
@@ -248,35 +199,85 @@ jobs:
                 'processed_at': time.time()
             }
             
-            os.makedirs('results', exist_ok=True)
-            results_file = f'results/{timestamp}.json'
-            with open(results_file, 'w') as f:
-                json.dump(results, f, indent=2)
-            
-            print(f'Results saved to {results_file}')
+            with open(os.environ['GITHUB_ENV'], 'a') as f:
+                f.write(f'PROCESSING_RESULTS<<EOF\n{json.dumps(results)}\nEOF\n')
             
         except Exception as e:
             print(f'Error: {str(e)}')
-            
             error_results = {
                 'error': True,
                 'message': str(e),
                 'timestamp': timestamp,
                 'processed_at': time.time()
             }
-            
-            os.makedirs('results', exist_ok=True)
-            results_file = f'results/{timestamp}.json'
-            with open(results_file, 'w') as f:
-                json.dump(error_results, f, indent=2)
-            
-            sys.exit(1)
+            with open(os.environ['GITHUB_ENV'], 'a') as f:
+                f.write(f'PROCESSING_RESULTS<<EOF\n{json.dumps(error_results)}\nEOF\n')
         "
         
-    - name: Commit results
+    - name: Post results as comment
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        git add rate-limits.json results/
-        git commit -m "Update rate limits and add transcription results [skip ci]" || exit 0
-        git push
+        python3 -c "
+        import json, os, requests
+        
+        results = json.loads(os.environ['PROCESSING_RESULTS'])
+        issue_number = os.environ['ISSUE_NUMBER']
+        
+        if results.get('error'):
+            comment_body = f'''## ❌ Processing Failed
+        
+        **Error:** {results['message']}
+        
+        Please check your file and try again.'''
+        else:
+            violations_text = ''
+            if results['violations']:
+                violations_text = '### ❌ Violations Found:\n\n'
+                for i, v in enumerate(results['violations'], 1):
+                    violations_text += f'{i}. **{v[\"keyword\"]}** found as \"{v[\"matched_text\"]}\"\n'
+                    violations_text += f'   Context: ...{v[\"context\"]}...\n\n'
+            else:
+                violations_text = '### ✅ No Violations Found\n\nThis audio file does not contain any blocked keywords.\n\n'
+        
+            comment_body = f'''## 🎤 Audio Processing Complete
+        
+        **File:** {results['file_name']}
+        **Violations:** {results['violations_count']}
+        
+        {violations_text}
+        
+        ### 📝 Full Transcription:
+        ```
+        {results['transcription']}
+        ```
+        
+        ---
+        
+        TRANSCRIPTION_RESULTS_START
+        {json.dumps(results)}
+        TRANSCRIPTION_RESULTS_END'''
+        
+        headers = {
+            'Authorization': f'token {os.environ[\"GITHUB_TOKEN\"]}',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        
+        response = requests.post(
+            f'https://api.github.com/repos/ronakjindalghl/vm-drop-audio-checker/issues/{issue_number}/comments',
+            headers=headers,
+            json={'body': comment_body}
+        )
+        
+        if response.status_code == 201:
+            print('Results posted successfully')
+            
+            # Close the issue
+            requests.patch(
+                f'https://api.github.com/repos/ronakjindalghl/vm-drop-audio-checker/issues/{issue_number}',
+                headers=headers,
+                json={'state': 'closed'}
+            )
+        else:
+            print(f'Failed to post results: {response.status_code}')
+        "
