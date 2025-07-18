@@ -1,0 +1,282 @@
+name: Audio Transcription and Compliance Check
+
+on:
+  repository_dispatch:
+    types: [transcribe-audio]
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        pip install openai requests python-dotenv
+        
+    - name: Check rate limits
+      id: rate-check
+      run: |
+        python3 -c "
+        import json
+        import os
+        from datetime import datetime
+        
+        # Check current rate limits
+        try:
+            with open('rate-limits.json', 'r') as f:
+                limits = json.load(f)
+        except FileNotFoundError:
+            limits = {'date': '', 'hour': 0, 'count': 0}
+        
+        now = datetime.now()
+        current_date = now.strftime('%Y-%m-%d')
+        current_hour = now.hour
+        
+        # Reset if new hour or day
+        if limits['date'] != current_date or limits['hour'] != current_hour:
+            limits = {'date': current_date, 'hour': current_hour, 'count': 0}
+        
+        # Check if over limit
+        if limits['count'] >= 10:
+            print('Rate limit exceeded')
+            exit(1)
+        
+        print(f'Current usage: {limits[\"count\"]}/10 this hour')
+        
+        # Increment count
+        limits['count'] += 1
+        
+        with open('rate-limits.json', 'w') as f:
+            json.dump(limits, f)
+        "
+        
+    - name: Process audio file
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        AUDIO_CONTENT: ${{ github.event.client_payload.audio_content }}
+        FILE_NAME: ${{ github.event.client_payload.file_name }}
+        TIMESTAMP: ${{ github.event.client_payload.timestamp }}
+      run: |
+        python3 -c "
+        import json
+        import base64
+        import os
+        import re
+        import time
+        import sys
+        from openai import OpenAI
+        
+        def load_blocked_keywords():
+            keywords_content = '''Internal Revenue Service
+        Social Security number suspended
+        law enforcement action
+        asset seizure
+        federal warrant
+        Publishers Clearing House
+        mega jackpot
+        sweepstakes
+        claim your winnings
+        interest rate reduction
+        student loan forgiveness center
+        settle all old tax debt
+        100 % debt elimination
+        vehicle service contract
+        extended auto warranty
+        Apple Support Advisor
+        suspicious charge on your Amazon account
+        your IP address has been compromised
+        Google Play gift card
+        scratch off the code
+        pay with iTunes cards
+        Press 1 to connect
+        final courtesy call
+        do not hang up
+        rebate check
+        verification code over the phone
+        Department of Education settlement
+        Sweepstake
+        Jackpot
+        Million
+        Lottery
+        Bank
+        Loan
+        Package
+        Giveaway
+        Game
+        Gaming
+        Unclaimed
+        Paypal
+        Affirm
+        Coinbase
+        Binance
+        Bank of America
+        Chase
+        Amazon
+        Mercedes Benz
+        Cybertrunk
+        MegaMillions
+        Powerball
+        PCH
+        Reader's Digest
+        Readers Digest
+        Quickbooks
+        Claims code
+        Claims ID
+        Claim number
+        Claims agent
+        Claims office
+        Claim reward
+        Unclaimed reward
+        Prize patrol
+        Patrol team
+        Fraud Department
+        Security Department
+        Claims Department
+        Lottery Department
+        Unclaimed Department
+        Gaming Commission
+        Multistate Lottery Association
+        Global International Lottery
+        Global Lottery Sweepstakes
+        Government Bureau
+        Federal Reserve Bank
+        Mega Millions
+        Exclusive claims
+        Award winner
+        Cash
+        Prizes
+        Claim number
+        Award presentation
+        give away
+        IRS
+        Games Commission'''
+            
+            keywords = []
+            for line in keywords_content.strip().split('\n'):
+                if line.strip():
+                    keywords.append(line.strip())
+            return keywords
+        
+        def check_for_blocked_content_substring(transcription, blocked_keywords):
+            found_violations = []
+            
+            for keyword in blocked_keywords:
+                pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+                matches = pattern.finditer(transcription)
+                
+                for match in matches:
+                    start_pos = max(0, match.start() - 50)
+                    end_pos = min(len(transcription), match.end() + 50)
+                    context = transcription[start_pos:end_pos]
+                    
+                    found_violations.append({
+                        'keyword': keyword,
+                        'matched_text': match.group(),
+                        'context': context,
+                        'position': match.start()
+                    })
+            
+            return found_violations
+        
+        def transcribe_with_retry(client, audio_data, max_retries=3):
+            for attempt in range(max_retries):
+                try:
+                    with open('temp_audio.mp3', 'wb') as f:
+                        f.write(audio_data)
+                    
+                    with open('temp_audio.mp3', 'rb') as audio_file:
+                        transcript = client.audio.transcriptions.create(
+                            model='whisper-1',
+                            file=audio_file,
+                            response_format='text'
+                        )
+                    
+                    os.remove('temp_audio.mp3')
+                    return transcript
+                    
+                except Exception as e:
+                    print(f'Attempt {attempt + 1} failed: {str(e)}')
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                    else:
+                        raise e
+        
+        # Main processing
+        try:
+            api_key = os.environ['OPENAI_API_KEY']
+            audio_content = os.environ['AUDIO_CONTENT']
+            file_name = os.environ['FILE_NAME']
+            timestamp = os.environ['TIMESTAMP']
+            
+            if not api_key:
+                raise Exception('OpenAI API key not found')
+            
+            print(f'Processing file: {file_name}')
+            
+            client = OpenAI(api_key=api_key)
+            audio_data = base64.b64decode(audio_content)
+            print(f'Audio data size: {len(audio_data)} bytes')
+            
+            print('Starting transcription...')
+            transcript = transcribe_with_retry(client, audio_data)
+            print(f'Transcription completed: {len(transcript)} characters')
+            
+            blocked_keywords = load_blocked_keywords()
+            print(f'Loaded {len(blocked_keywords)} blocked keywords')
+            
+            print('Checking for violations...')
+            violations = check_for_blocked_content_substring(transcript, blocked_keywords)
+            print(f'Found {len(violations)} violations')
+            
+            results = {
+                'file_name': file_name,
+                'timestamp': timestamp,
+                'transcription': transcript,
+                'violations': violations,
+                'violations_count': len(violations),
+                'processed_at': time.time()
+            }
+            
+            os.makedirs('results', exist_ok=True)
+            results_file = f'results/{timestamp}.json'
+            with open(results_file, 'w') as f:
+                json.dump(results, f, indent=2)
+            
+            print(f'Results saved to {results_file}')
+            
+        except Exception as e:
+            print(f'Error: {str(e)}')
+            
+            error_results = {
+                'error': True,
+                'message': str(e),
+                'timestamp': timestamp,
+                'processed_at': time.time()
+            }
+            
+            os.makedirs('results', exist_ok=True)
+            results_file = f'results/{timestamp}.json'
+            with open(results_file, 'w') as f:
+                json.dump(error_results, f, indent=2)
+            
+            sys.exit(1)
+        "
+        
+    - name: Commit results
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add rate-limits.json results/
+        git commit -m "Update rate limits and add transcription results [skip ci]" || exit 0
+        git push
